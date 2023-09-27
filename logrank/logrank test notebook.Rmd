@@ -1,0 +1,437 @@
+---
+title: "Logrank test simulations"
+output:
+  word_document: default
+  html_notebook: default
+  pdf_document: default
+---
+In this notebook we will implement the logrank test, which is a non parametric test that is used to test the equality of two survival functions: $H_0: S_0(t) = S_1(t)$. This test is used also in scenarios where there is right-censoring.
+
+We suppose that the True Times (uncensored) follow a Weibull distribution (in both groups). The Weibull distribution with shape parameter $a$ and scale parameter $\sigma$ has density given by:
+
+\[
+f(x) = \frac{a}{\sigma} \left( \frac{x}{\sigma} \right)^{a-1} \exp\left(-\frac{x}{a} \right)^a
+\]
+
+The cumulative distribution function is $F(x) = 1-\exp\left(-\frac{x}{\sigma} \right)^a, x>0$
+
+We also generate the censoring times, following an exponential distribution. Right now, we suppose the same rate parameter for both treatment groups (but we could change that and change the censoring).
+
+**1) First step: pvalue estimation**
+For the first simulations, we will estimate the pvalue using the expression we derived for the test statistics and variance. For this, we will use the function "pvalue_comp" that has the following inputs and outputs:
+
+**Input:**
+- n0, n1: size of samples from group 0 and 1, respectively
+
+- shape0, scale0: shape and scale parameters for Weibull distribution of True times from group 0
+
+- shape1, scale1: shape and scale parameters for Weibull distribution of True times from group 1
+
+- nb_it: number of iterations, ie number of simulations we'll perform
+
+- return_data: TRUE or FALSE. If TRUE, returns pval, data, our_test_stat, r_fit_pval, r_fit_chisq. Default is FALSE (returns only pval)
+
+**Output:**
+- pval: list of our estimation of pvalues for each simulation
+
+If return_data = TRUE:
+
+- data: The simulated data in dataframe that has: taus (times), status (censoring status) and groups (=0 or 1)
+
+- our_test_stat: Our estimation of the test statistic
+
+- r_fit_pval: R's build-in function to estimate the pvalue
+
+- r_fit_chisq: R's build-in function to estimate the test statistic
+
+
+We generate the True Times following Weibull distribution, and the censoring times following Exponential. We suppose that both groups have the censoring with the same rate. We define the observed times as the minimum between the True times and Censored times.
+
+```{r}
+require(survival)
+
+pvalue_comp<- function(n0,n1,shape0,scale0,shape1,scale1, nb_it, return_data = FALSE){
+  pval = c()
+  test_stat = c()
+  r_fit_pval = c()
+  r_fit_chisq = c()
+  datas = c()
+  n = n0+n1
+  it = 0
+  while(it<nb_it){
+    it = it+1
+    #cat("iter = ",it)
+    truetimes0_unsort = rweibull(n0,shape=shape0,scale=scale0) # True times: censored and uncensored
+    censtimes0_unsort = rexp(n0,rate=1/15) # Censoring times
+    status0_unsort = as.numeric(truetimes0_unsort <= censtimes0_unsort) # Censoring status: 1 if uncensored, 0 if censored
+    
+    alltimes0_unsort = pmin(truetimes0_unsort, censtimes0_unsort) # Observed times: min between true times and censored times
+    
+    Tsort0 = sort(alltimes0_unsort, index.return = TRUE)
+    alltimes0 = Tsort0$x # Observed times (sorted)
+    status0 = status0_unsort[Tsort0$ix] # Corresponding censored status
+    group0 = rep(0, n0) # vector of 0s 
+    
+    truetimes1_unsort = rweibull(n1,shape=shape1,scale=scale1) # True times: censored and uncensored
+    censtimes1_unsort = rexp(n1,rate=1/15) # Censoring times
+    status1_unsort = as.numeric(truetimes1_unsort <= censtimes1_unsort) # Censoring status: 1 if uncensored, 0 if censored
+    alltimes1_unsort = pmin(truetimes1_unsort, censtimes1_unsort) # Observed times: min between true times and censored times
+    
+    Tsort1 = sort(alltimes1_unsort, index.return = TRUE)
+    alltimes1 = Tsort1$x # Observed times (sorted)
+    status1 = status1_unsort[Tsort1$ix] # corresponding status for the sorted times
+    group1 = rep(1, n1) # vector of 1s
+    
+    taus_sort = sort(c(alltimes0, alltimes1), index.return = TRUE) 
+    taus = taus_sort$x # all observed times (from both groups)
+    
+    status_unsort = c(status0, status1) 
+    status = status_unsort[taus_sort$ix] # all censoring status (from both groups)
+    
+    groups_unsort = c(group0, group1)
+    groups = groups_unsort[taus_sort$ix]
+    
+    data <- data.frame(taus, status, groups)
+    
+    # computing number of deaths and number at risk for each group for each time tauj:
+    m = length(taus)
+    
+    d0 = c()
+    d1 = c()
+    cens0 = c()
+    cens1 = c()
+    
+    for(i in 1:length(taus)){
+      val0 = 0
+      # number of deaths at each tauj: uncensored and betweeen tauj and tau_{j-1}
+      countd0 = sum(as.numeric(alltimes0[status0==1]==taus[i])) # uncensored times are equal to tauj
+      d0 <- c(d0,countd0)
+      
+      countc0 = sum(as.numeric(alltimes0[status0==0]==taus[i])) # uncensored times are equal to tauj
+      cens0 <- c(cens0,countc0)
+      
+      countd1 = sum(as.numeric(alltimes1[status1==1]==taus[i])) # uncensored times are less than tauj
+      d1 <- c(d1,countd1)
+      
+      countc1 = sum(as.numeric(alltimes1[status1==0]==taus[i])) # uncensored times are less than tauj
+      cens1 <- c(cens1,countc1) 
+      
+    }
+    
+    d = d0+d1
+    
+    m = length(taus)
+    
+    # computing number at risk
+    
+    risk0 = rep(n0,m)
+    risk1 = rep(n1,m)
+    risk0[2:m] = risk0[2:m] - cumsum(d0+cens0)[1:(m-1)]
+    risk1[2:m] = risk1[2:m] - cumsum(d1+cens1)[1:(m-1)]
+    
+    Y = risk0+risk1 #seq(n,1,by=-1)
+    
+    E = sum(d*risk1/Y)
+    
+    #Calculate the test statistic
+    #Z = sum(d1*risk0/Y - d0*risk1/Y)
+    #V = sum(d*risk0*risk1/Y^2)
+    #X = Z^2/V
+    #pchisq(X,1,lower.tail = F)
+    
+    O = sum(d1)
+    
+    V = ((Y - risk1)/(Y-1))*risk1*(d/Y)*(1-d/Y)
+    
+    Z = (O-E)/sqrt(sum(na.omit(V))) # follows (asymptotically) a N(0,1)
+    
+    Z2 = Z^2 # test statistic that follows (asymptotically) a chi squared with one degree of liberty
+    #Get the p-value: smallest alpha for which H0 is rejected. H0: hazard functions are equal 
+    test_stat = c(test_stat, Z2)
+    fit = survdiff(Surv(taus, status)~groups, data=data)
+    r_fit_pval = c(r_fit_pval, fit$pvalue) # fit from R build in function
+    r_fit_chisq = c(r_fit_chisq, fit$chisq)
+    pval = c(pval,pchisq(Z2,1,lower.tail = F)) # our estimation of pvalue
+    datas = c(datas, data)
+    
+  }
+  if(return_data == TRUE){
+    return(list("pval"=pval, "data" = datas, "our_test_stat" = test_stat, "r_fit_pval" = r_fit_pval, "r_fit_chisq" = r_fit_chisq))
+  }
+  return(pval)
+}
+
+```
+We can plot the histogram of pvalues and see if our test is well calibrated, ie if:
+
+\[
+\frac{\# p-value \leq \alpha}{\# simulations} = \alpha
+\]
+
+Where we’ll fix $\alpha=0.05$ and we'll simulate our data under H0.
+```{r}
+# Analysis of pvalue
+# Under H0
+
+nb_it = 500
+n0 = 200
+n1 = 200
+
+
+shape0 = 0.5
+scale0 = 5
+shape1 = 0.5
+scale1 = 5
+
+res = pvalue_comp(n0,n1,shape0,scale0,shape1,scale1,nb_it, return_data = TRUE) 
+
+pval = res$pval # our estimated pval
+
+pval_unl <- unlist(pval, use.names = FALSE)
+hist(pval_unl, main = "Histogram of pvalue of logrank", xlab = "pvalue")
+
+#print(mean(pval_unl<=0.1)) # We expect it to be close to 0.1 (uniform)
+```
+We have that the pvalues are uniformly distributed, which was expected. The reason for this comes from the definition of α
+ as the probability of a type I error. We want the probability of rejecting a true null hypothesis to be α, we reject when the observed p−value<α, the only way this happens for any value of alpha is when the p-value comes from a uniform distribution. If the null hypothesis is false then the distribution of the p-value will (hopefully) be more weighted towards 0.
+
+```{r}
+alpha = 0.05
+numerator = sum(pval_unl<alpha)
+denominator = length(pval_unl)
+cat("Percentage of times that wrongfully rejected H0: ", numerator/denominator)
+```
+We have that our test is well calibrated, because the percentage of times that it wrongfully rejects H0 (when H0 is correct) is close to $\alpha$
+
+
+We can compare with the result obtained by the built-in function from R, for any iteration that we want. Here we show the results for the first iteration:
+```{r}
+Z2 = res$our_test_stat
+r_chisq = res$r_fit_chisq
+r_pval = res$r_fit_pval
+
+cat("Our pvalue:", pval[1], ", R's pvalue:", r_pval[1], "\n" )
+cat("Our test statistic:", Z2[1], ", R's test statistic:", r_chisq[1], "\n" )
+```
+Plotting the survival curves (Kaplan-Meier estimate):
+```{r}
+library(ggplot2)
+library(ggfortify)
+# corresponding data for the first iteration:
+data_1 = data.frame(res$data[1:3])
+
+r_fit_1 = survfit(Surv(data_1$taus, data_1$status)~data_1$groups, data=data_1)
+autoplot(r_fit_1 ,xlim= c(0,50))
+#autoplot(r_fit_1, fun = 'event',xlim= c(0,50))
+```
+
+
+We can now place ourselves in H1 to analyse the power of the test:
+```{r}
+# Analysis of the probability of rejecting H0 given that data is under H1
+# Simulate data under H1
+
+nb_it = 500
+n0 = 200
+n1 = 200
+
+# supposing delta = 2 (Lambda1 = delta*Lambda2)
+# change only scale, keep the same shape in both groups (in order to have proportional risks)
+shape0 = 0.5
+scale0 = 10
+shape1 = 0.5
+scale1 = 5
+
+p_list = pvalue_comp(n0,n1,shape0,scale0,shape1,scale1,nb_it) 
+
+p_unl <- unlist(p_list, use.names = FALSE)
+hist(p_unl, main = "Histogram of pvalue of logrank", xlab = "pvalue")
+
+```
+```{r}
+numerator = sum(p_unl<0.05)
+denominator = length(p_unl)
+cat("Percentage of times that correctly rejected H0: ", numerator/denominator)
+```
+**2) Second step: power estimation**
+
+We can now run the estimated power (from the expression we derived in theory). Once again we'll generate the data, supposing that the True times follow a Weibull distribution and the censoring follows an Exponential distribution. We will do so in the following function "power_comp":
+
+** Inputs:**
+- n0,n1: sample size of groups 0 and 1
+- shape0: shape parameter of the Weibull distribution from group 0. It is the same as in group 1
+- scale0: scale parameter of the Weibull distribution from group 0
+- delta: $\delta = \frac{scale 0 }{scale 1}$
+- alpha: type I error: $P_{H0}(reject H0)$
+
+**Output:**
+- powers: our estimation of the power of the test
+
+```{r}
+# Computing the power from the formula
+
+power_comp<- function(n0,n1,shape0,scale0,delta, alpha){
+  powers = c() # power = 1-beta
+  n = n0+n1
+  it = 0
+  mu = n1/n # ratio = mu
+  shape1 = shape0
+  scale1 = scale0/delta
+  truetimes0_unsort = rweibull(n0,shape=shape0,scale=scale0) # censored and uncensored
+  censtimes0_unsort = rexp(n0,rate=1/15) 
+  status0_unsort = as.numeric(truetimes0_unsort <= censtimes0_unsort) # 1 if uncensored
+  alltimes0_unsort = pmin(truetimes0_unsort, censtimes0_unsort)
+    
+  Tsort0 = sort(alltimes0_unsort, index.return = TRUE)
+  alltimes0 = Tsort0$x
+  status0 = status0_unsort[Tsort0$ix]
+  group0 = rep(0, n0)
+    
+  truetimes1_unsort = rweibull(n1,shape=shape1,scale=scale1) # censored and uncensored
+  censtimes1_unsort = rexp(n1,rate=1/15) 
+  status1_unsort = as.numeric(truetimes1_unsort <= censtimes1_unsort)
+  alltimes1_unsort = pmin(truetimes1_unsort, censtimes1_unsort)
+    
+  Tsort1 = sort(alltimes1_unsort, index.return = TRUE)
+  alltimes1 = Tsort1$x
+  status1 = status1_unsort[Tsort1$ix] # corresponding status for the sorted times
+  group1 = rep(1, n1)
+    
+  taus_sort = sort(c(alltimes0, alltimes1), index.return = TRUE)
+  taus = taus_sort$x
+    
+  status_unsort = c(status0, status1) # all censoring status
+  status = status_unsort[taus_sort$ix]
+    
+  groups_unsort = c(group0, group1)
+  groups = groups_unsort[taus_sort$ix]
+    
+  data <- data.frame(taus, status, groups)
+    
+  # computing number of deaths and number at risk for each group for each time tauj:
+  m = length(taus)
+    
+  d0 = c()
+  d1 = c()
+  cens0 = c()
+  cens1 = c()
+    
+  for(i in 1:length(taus)){
+    val0 = 0
+    # number of deaths at each tauj: uncensored and betweeen tauj and tau_{j-1}
+    countd0 = sum(as.numeric(alltimes0[status0==1]==taus[i])) # uncensored times are less than tauj
+    d0 <- c(d0,countd0)
+      
+    countc0 = sum(as.numeric(alltimes0[status0==0]==taus[i])) # uncensored times are less than tauj
+    cens0 <- c(cens0,countc0)
+      
+    countd1 = sum(as.numeric(alltimes1[status1==1]==taus[i])) # uncensored times are less than tauj
+    d1 <- c(d1,countd1)
+      
+    countc1 = sum(as.numeric(alltimes1[status1==0]==taus[i])) # uncensored times are less than tauj
+    cens1 <- c(cens1,countc1) 
+      
+  }
+    
+  d = d0+d1
+    
+  m = length(taus)
+    
+  # computing number at risk
+    
+  risk0 = rep(n0,m)
+  risk1 = rep(n1,m)
+  risk0[2:m] = risk0[2:m] - cumsum(d0+cens0)[1:(m-1)]
+  risk1[2:m] = risk1[2:m] - cumsum(d1+cens1)[1:(m-1)]
+    
+  Y = risk0+risk1 #seq(n,1,by=-1)
+    
+  E = sum(d*risk1/Y)
+    
+  #Calculate the test statistic
+  #Z = sum(d1*risk0/Y - d0*risk1/Y)
+  #V = sum(d*risk0*risk1/Y^2)
+  #X = Z^2/V
+  #pchisq(X,1,lower.tail = F)
+    
+  O = sum(d1)
+  
+  V = ((Y - risk1)/(Y-1))*risk1*(d/Y)*(1-d/Y)
+    
+  Z = (O-E)/sqrt(sum(na.omit(V))) # follows (asymptotically) a N(0,1)
+    
+  Z2 = Z^2 # test statistic that follows (asymptotically) a chi squared with one degree of liberty
+  #Get the p-value: smallest alpha for which H0 is rejected. H0: hazard functions are equal 
+    
+  scalier_fun0 <- stepfun(alltimes0,c(1,seq((n0-1)/n0, 1/n0, length.out= n0))) #verify the steps
+  scalier_fun1 <- stepfun(alltimes1,c(1,seq((n1-1)/n1, 1/n1, length.out = n1))) 
+  scalier_fun <- stepfun(taus,c(1,seq((n-1)/n, 1/n, length.out = n))) 
+    
+  # uncensored times of deaths
+  timed0_uncens = alltimes0[status0 == 1]
+  timed1_uncens = alltimes1[status1 == 1]
+  timed_uncens = taus[status == 1]
+    
+  #var_h1 = (1-mu)*delta*mean((scalier_fun0(timed1_uncens)* scalier_fun1(timed1_uncens)^2)/(scalier_fun(timed1_uncens)^2 )) + mu *  mean((scalier_fun1(timed1_uncens)*scalier_fun0(timed1_uncens)^2)/(scalier_fun(timed1_uncens)^2))
+  
+  var_h1 = (1-mu)*delta*mean((scalier_fun0(timed1_uncens)* scalier_fun1(timed1_uncens)^2)/(scalier_fun(timed1_uncens)^2 )) + mu * scalier_fun1(timed1_uncens)* mean((scalier_fun0(timed1_uncens)^2)/(scalier_fun(timed1_uncens)^2))
+  
+    
+  var_h0 = V # previously computed variance (under H0)
+    
+  #z_quant = qchisq(1-alpha/2, df = 1) # quantile of order 1-alpha/2 of chisq
+  z_quant = qnorm(1-alpha/2)
+    
+  c = sqrt(n/(n0*n1))
+  #V = ((Y - risk1)/(Y-1))*risk1*(d/Y)*(1-d/Y)
+  #cent_integ = (risk0 * risk1)*d1*(risk1 - d1)/((Y^2)*(risk1 - 1))
+  cent_integ = (risk0/Y)*d1
+  centering_term = sum((c*cent_integ*(delta - 1))[groups == 1])
+    
+  # power: 1-beta
+  #power = 1- pchisq((var_h0*z_quant - centering_term)/(var_h1) , df = 1) + pchisq((-var_h0*z_quant - centering_term)/(var_h1) , df = 1)
+    
+  #power = 1- pnorm((var_h0*z_quant - centering_term)/(var_h1)) + pnorm((-var_h0*z_quant - centering_term)/(var_h1))
+  power = 1- pnorm((sum(na.omit(var_h0))*z_quant - centering_term)/(sum(na.omit(var_h1))) ) + pnorm((-sum(na.omit(var_h0))*z_quant - centering_term)/(sum(na.omit(var_h1))))
+    
+    
+  
+  return(power)
+}
+
+
+```
+We can plot the power for different values of $\delta$:
+
+```{r}
+n0 = 500
+n1 = 500
+
+# supposing delta = 2 (Lambda1 = delta*Lambda2)
+shape0 = 0.5
+scale0 = 5
+
+alpha = 0.05
+
+deltas_lst = seq(from = 1, to = 50, by = 1)
+
+powers = c()
+for(delta in deltas_lst){
+  powers = c(powers, power_comp(n0,n1,shape0,scale0,delta,alpha))
+}
+
+plot(powers, type = "l", xlab = "delta", ylab = "power")
+```
+We see that the power increases as delta increases, which is expected: as the scale of the two distributions become more distant, it gets easier to tell the two distributions apart.
+
+REMARK: check if the expression for var_h1 is correct (otherwise use the commented one above, that returns a S-shaped curve)
+
+We can check that the power when $\delta = 1$ is approximately equal to $\alpha$:
+```{r}
+print(powers[1])
+```
+
+And when delta is big, the power is close to 1:
+```{r}
+print(tail(powers, n=1))
+```

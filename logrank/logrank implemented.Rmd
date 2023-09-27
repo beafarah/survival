@@ -1,0 +1,152 @@
+---
+title: "Logrank test"
+output: html_notebook
+---
+In this notebook we will implement the logrank test, which is a non parametric test that is used to test the equality of two survival functions: $H_0: S_0(t) = S_1(t)$. This test is used also in scenarios where there is right-censoring.
+
+We will generate our data following Weibull distributions. Thw Weibull distribution with shape parameter $a$ and scale parameter $\sigma$ has density given by:
+
+\[
+f(x) = \frac{a}{\sigma} \left( \frac{x}{\sigma} \right)^{a-1} \exp\left(-\frac{x}{a} \right)^a
+\]
+
+The cumulative distribution function is $F(x) = 1-\exp\left(-\frac{x}{\sigma} \right)^a, x>0$
+
+We also generate the censoring times, following an exponential distribution. Right now, we suppose the same rate parameter for both treatment groups (but we could change that and change the censoring).
+
+```{r}
+require(survival)
+# number of observations in each group
+n0 = 100
+n1 = 100
+n = n0+n1
+
+# parameters for the weibull distribution
+shape0 = 0.3
+scale0 = 5
+shape1 = 0.5
+scale1 = 5
+
+# parameters for the exponential censoring
+rate0 = 0.1
+rate1 = 0.1
+
+# group 0 
+alltimes0_unsort = rweibull(n0,shape=shape0,scale=scale0) # censored and uncensored times
+censtimes0_unsort = rexp(n0,rate=rate0) # exponential censoring
+status0_unsort = as.numeric(alltimes0_unsort <= censtimes0_unsort) # censoring status: 0 if uncensored
+
+Tsort0 = sort(alltimes0_unsort, index.return = TRUE)
+alltimes0 = Tsort0$x # sorted times group 0
+status0 = status0_unsort[Tsort0$ix] # corresponding censoring status group 0
+group0 = rep(0, n0) # list with 0s (group id)
+
+# group 1
+alltimes1_unsort = rweibull(n1,shape=shape1,scale=scale1) # censored and uncensored times
+censtimes1_unsort = rexp(n1,rate=rate1) # exponential censoring
+status1_unsort = as.numeric(alltimes1_unsort <= censtimes1_unsort) 
+
+Tsort1 = sort(alltimes1_unsort, index.return = TRUE)
+alltimes1 = Tsort1$x # sorted times group 1
+status1 = status1_unsort[Tsort1$ix] # corresponding censoring status for the sorted times group 1
+group1 = rep(1, n1) # list with 1s (group id)
+
+
+```
+We will construct a dataset with all the times (censored and uncensored), status and group id:
+
+```{r}
+taus_sort = sort(c(alltimes0, alltimes1), index.return = TRUE)
+taus = taus_sort$x
+
+status_unsort = c(status0, status1) # all censoring status
+status = status_unsort[taus_sort$ix]
+
+groups_unsort = c(group0, group1)
+groups = groups_unsort[taus_sort$ix]
+
+data <- data.frame(taus, status, groups)
+head(data, 10)
+```
+We can then compute the number of deaths and number at risk for each group at each time $\tau$
+
+```{r}
+m = length(taus)
+
+d0 = c() # uncensored deaths for each time in group 0
+d1 = c() # uncensored deaths for each time in group 1
+cens0 = c() # censored events at each time in group 0
+cens1 = c() # censored events at each time in group 1
+
+for(i in 1:length(taus)){
+  val0 = 0
+  # number of deaths at each tauj in group 0
+  countd0 = sum(as.numeric(alltimes0[status0==1]==taus[i])) 
+  d0 <- c(d0,countd0)
+  # number of censored events at each tauj in group 0
+  countc0 = sum(as.numeric(alltimes0[status0==0]==taus[i])) 
+  cens0 <- c(cens0,countc0)
+  # number of deaths at each tauj in group 1
+  countd1 = sum(as.numeric(alltimes1[status1==1]==taus[i])) 
+  d1 <- c(d1,countd1)
+  # number of censored events at each tauj in group 1
+  countc1 = sum(as.numeric(alltimes1[status1==0]==taus[i])) 
+  cens1 <- c(cens1,countc1) 
+}
+
+d = d0+d1 # total number of deaths in each time 
+
+m = length(taus)
+
+# computing number at risk
+
+risk0 = rep(n0,m)
+risk1 = rep(n1,m)
+risk0[2:m] = risk0[2:m] - cumsum(d0+cens0)[1:(m-1)]
+risk1[2:m] = risk1[2:m] - cumsum(d1+cens1)[1:(m-1)]
+```
+
+We can finally compute the test statistic:
+
+```{r}
+# total number at risk in each time
+Y = risk0+risk1 #seq(n,1,by=-1)
+# expected number of deaths in group 1
+E = sum(d*risk1/Y)
+# observed number of deaths in group 1
+O = sum(d1)
+# variance
+V = ((Y - risk1)/(Y-1))*risk1*(d/Y)*(1-d/Y)
+# squared test statistic
+Z = (O-E)/sqrt(sum(na.omit(V)))
+# test statistic that follows (asymptotically) a chi squared with one degree of liberty
+Z2 = Z^2
+print(Z2)
+# P-value: smallest alpha for which H0 is rejected. H0: hazard functions are equal 
+pchisq(Z2,1,lower.tail = F)
+```
+We can compare with the result obtained by the built-in function from R:
+```{r}
+fit <- survdiff(Surv(taus, status)~groups, data=data)
+#fit <- survfit(Surv(taus, status) ~ groups, data = data)
+fit
+```
+Particularly, we can compare our results with the ones obtained from the buikt-in function from R:
+```{r}
+cat("Our expected group 0:", sum(d*risk0/Y), "\n" )
+cat("Our expected group 1:", sum(d*risk1/Y), "\n" )
+cat("Our pvalue:", pchisq(Z2,1,lower.tail = F), ", R's pvalue:", fit$pvalue, "\n" )
+cat("Our test statistic:", Z2, ", R's test statistic:", fit$chisq, "\n" )
+```
+
+
+We can see the plot:
+```{r}
+library(ggfortify)
+autoplot(fit, xlim= c(0,100))
+```
+```{r}
+autoplot(survfit(Surv(taus, status) ~ groups, data = data), fun = 'event', xlim= c(0,100))
+```
+
+Now we can run some tests
